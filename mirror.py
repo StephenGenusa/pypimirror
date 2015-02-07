@@ -14,6 +14,17 @@
 # 3) Fixed problem with sourceforge.net requests where files no 
 #      longer exist
 #
+# Modifications February 2015 by Stephen Genusa
+# 1) Saves a filtered list to a pickled file to deal with an
+#      exception that is being trapped (somewhere) but not 
+#      handled causing the script to halt without any indication
+#      The pickled filter file allows me to restart the process
+#      where it left off, lowering time and wasted bandwidth
+# 2) Downloaded archives are now timestamped to the newest file
+#      contained in the archive rather than the date/time it was
+#      downloaded
+# 3) Info.html is saved only if PyPi's html file is larger than
+#      the one already saved to the local mirror
 
 import re
 import os
@@ -38,6 +49,7 @@ from BeautifulSoup import BeautifulSoup
 from glob import fnmatch
 from logger import getLogger
 import HTMLParser
+import touch_archives
 try: 
    from hashlib import md5
 except ImportError:
@@ -119,53 +131,76 @@ class PypiPackageList(object):
         self._pypi_xmlrpc_url = pypi_xmlrpc_url
 
     def list(self, filter_by=None, incremental=False, fetch_since_days=7):
-        use_pickled_index=False
+        print "Building package list for updates. incremental=", incremental, "fetch_since_days=", fetch_since_days
+        use_pickled_index=True
         strListPickled = 'packages.p'
         server = xmlrpclib.Server(self._pypi_xmlrpc_url)
         if use_pickled_index and os.path.isfile(strListPickled):
-         packages = pickle.load(open(strListPickled, 'rb'))
+            print "Loading packages.p"
+            packages = pickle.load(open(strListPickled, 'rb'))
         else:
             packages = server.list_packages()
             try:    
                 if use_pickled_index:
                     pickle.dump(packages, open(strListPickled, 'wb'))
                 else:
-                    os.remove(strListPickled)
+                    if os.path.isfile(strListPickled):
+                        os.remove(strListPickled)
             except Exception, e:
                 raise PackageError("General error: %s" % e)
            
 
-        intCounter = 0
+        print "   Initial Package Count  = " + str(len(packages))
 
-        #if not use_pickled_index:
-            #packages = list(set(packages))
-        
-        #pkg_start_pos = intCounter
-        #packages = packages[pkg_start_pos:]
-        #return packages
-        
-        
-        print "   Initial Package Count  = " + str(len(packages)-intCounter)
+        # There is a case where this script halts with no exception
+        # so I am not sure where the code is failing yet.
+        pkg_start_pos = 0
 
+        # This is a workaround until I locate that problem
+        # This first case handles a non-incremental update:
+        if not incremental and not use_pickled_index:
+            packages = list(set(packages))
+            packages = packages[pkg_start_pos:]
+            return packages
+
+        # This second case handles the incremental update:
+        # If the script finds the incremental package list already
+        # built it returns that so that 1) the list does not have to 
+        # be rebuilt and 2) you can pickup from the point of failure
+        # by changing pkg_start_pos to the last good package number
+        # shown in the previous run
+        if incremental:
+            strIncrementalPickled = "incremental_" + strListPickled
+            if use_pickled_index and os.path.isfile(strIncrementalPickled):
+                print "Loading " + strIncrementalPickled
+                packages = pickle.load(open(strIncrementalPickled, 'rb'))
+                packages = packages[pkg_start_pos:]
+                print "Incremental Package Count = " + str(len(packages))
+                return packages
+        
         filtered_packages = []
         for package in packages:
-            if not True in [fnmatch.fnmatch(package, f) for f in filter_by]:
-                continue
-            filtered_packages.append(package)
-        
+            if len(filter_by) > 0:
+                if not True in [fnmatch.fnmatch(package, f) for f in filter_by]:
+                    continue
+                filtered_packages.append(package)
+            else:
+                filtered_packages.append(package)
         print "   Filtered Package Count = " + str(len(filtered_packages))
          
         if incremental:
+            socket.setdefaulttimeout(120)
             changelog = server.changelog(int(time.time() - fetch_since_days*24*3600))
             changed_packages = [tp[0] for tp in changelog 
                                 if 'file' in tp[3]]
             changed_packages = [package for package in changed_packages if package in filtered_packages]
             changed_packages = list(set(changed_packages))
             print "Incremental Package Count = " + str(len(changed_packages))
-            socket.setdefaulttimeout(30)
+            if use_pickled_index:
+                pickle.dump(changed_packages, open("incremental_" + strListPickled, 'wb'))
             return changed_packages
         else:
-            socket.setdefaulttimeout(30)
+            socket.setdefaulttimeout(120)
             filtered_packages = list(set(filtered_packages))
             print "Filtered Package Count(2) = " + str(len(filtered_packages))
             return filtered_packages
@@ -218,11 +253,19 @@ class Package(object):
            #print 'https://pypi.python.org/pypi/' + self.name + '/'
            raw_html = urlopen('https://pypi.python.org/pypi/' + self.name + '/').read()
            
-           # Save the raw_html:
-           # LS = '/Volumes/LS/PyPi'
-           #if not os.path.exists(LS + self.name):
-           #    os.mkdir(LS + self.name)
-           #open(os.path.join(LS + self.name + "/info.html"), "wb").write(raw_html)
+           #
+           # Save the raw_html if it is larger than the existing file:
+           # If someone nukes a package from the repo leaving a blank page
+           # I don't want to lost valuable information
+           if not os.path.exists(local_pypi_path + self.name):
+               os.mkdir(local_pypi_path + self.name)
+           html_info_filename = os.path.join(local_pypi_path, self.name, "info.html")
+           if (os.path.isfile(html_info_filename) and len(raw_html) > os.path.getsize(html_info_filename)) or not os.path.isfile(html_info_filename):
+               open(html_info_filename, "wb").write(raw_html)
+               LOG.debug("HTML info file written " + html_info_filename)
+           else:
+               LOG.debug("HTML info file already exists")
+
        except Exception, e:
            raise PackageError('Generic error: %s' % e)
            print 'Generic error: %s' % e
@@ -238,7 +281,7 @@ class Package(object):
            #URL_LOG.debug("URL Error: %s " % self.url())
            raise PackageError("URL Error: %s " % self.url())
        except Exception, e:
-           URL_LOGdebug('Generic error: %s' % e)
+           URL_LOG.debug('Generic error: %s' % e)
            raise PackageError('Generic error: %s' % e)
        return html
 
@@ -604,7 +647,12 @@ class Mirror(object):
                   full_list.append(mirror_package._html_link(base_url, filename, md5_hash))
                   if verbose:
                       LOG.debug(" Stored: %s [%d kB]" % (filename, len(data)//1024))
-                      
+                  
+                  fullpath_filename = os.path.join(local_pypi_path, package_name, filename)
+                  LOG.debug ("  Touching archive " + fullpath_filename)    
+                  touch_archives.process_file(fullpath_filename, False)
+
+
 # Disabled cleanup for now since it does not deal with the changelog() implementation
 #            if cleanup:
 #                mirror_package.cleanup(links, verbose)
@@ -827,8 +875,8 @@ config_defaults = {
     'mirror_file_path': '/tmp/mirror',
     'lock_file_name': 'pypi-poll-access.lock',
     'filename_matches': '*.zip *.tgz *.egg *.tar.gz *.tar.bz2', # may be "" for *
-    'package_matches': "zope.app.* plone.app.*", # may be "" for *
-    'cleanup': True, # delete local copies that are remotely not available
+    'package_matches': "", # "zope.app.* plone.app.*", # may be "" for *
+    'cleanup': False, # delete local copies that are remotely not available
     'create_indexes': True, # create index.html files
     'verbose': True, # log output
     'log_filename': default_logfile,
@@ -867,6 +915,7 @@ def run(args=None):
    
     global LOG
     #global URL_LOG
+    global local_pypi_path
     usage = "usage: pypimirror [options] <config-file>"
     parser = optparse.OptionParser(usage=usage)
     parser.add_option('-v', '--verbose', dest='verbose', action='store_true',
@@ -895,6 +944,8 @@ def run(args=None):
     config_file_name = os.path.abspath(args[0])
     config = get_config_options(config_file_name)
 
+    local_pypi_path = config["mirror_file_path"]
+
     # correct things from config
     filename_matches = config["filename_matches"].split()
     package_matches = config["package_matches"].split()
@@ -917,7 +968,6 @@ def run(args=None):
 
     mirror = Mirror(config["mirror_file_path"])
     
-    
     lock = zc.lockfile.LockFile(os.path.join(config["mirror_file_path"], config["lock_file_name"]))
     
     LOG = getLogger(filename=log_filename, log_console=options.log_console)
@@ -939,3 +989,4 @@ def run(args=None):
 
 if __name__ == '__main__':
     sys.exit(run())
+
