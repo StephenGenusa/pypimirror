@@ -25,6 +25,12 @@
 #      downloaded
 # 3) Info.html is saved only if PyPi's html file is larger than
 #      the one already saved to the local mirror
+# 4) Added code to save completed position/resume position on restart
+#
+# Modifications March 2015 by Stephen Genusa
+# 1) Saves DOAP XML file for current package
+
+
 
 import re
 import os
@@ -49,7 +55,9 @@ from BeautifulSoup import BeautifulSoup
 from glob import fnmatch
 from logger import getLogger
 import HTMLParser
+import time
 import touch_archives
+import linecache
 try: 
    from hashlib import md5
 except ImportError:
@@ -70,6 +78,19 @@ def pypimirror_version():
     """
     version = pkg_resources.working_set.by_key["z3c.pypimirror"].version
     return 'z3c.pypimirror/%s' % version
+
+
+# http://stackoverflow.com/questions/14519177/python-exception-handling-line-number
+def GetExceptionInfo():
+    exc_type, exc_obj, tb = sys.exc_info()
+    f = tb.tb_frame
+    lineno = tb.tb_lineno
+    filename = f.f_code.co_filename
+    linecache.checkcache(filename)
+    line = linecache.getline(filename, lineno, f.f_globals)
+    return 'EXCEPTION IN ({}, LINE {} "{}"): {}'.format(filename, lineno, line.strip(), exc_obj)
+
+
 
 def urlopen(url):
     """ This behave exactly like urllib2.urlopen, but injects a header
@@ -131,16 +152,18 @@ class PypiPackageList(object):
         self._pypi_xmlrpc_url = pypi_xmlrpc_url
 
     def list(self, filter_by=None, incremental=False, fetch_since_days=7):
-        print "Building package list for updates. incremental=", incremental, "fetch_since_days=", fetch_since_days
+        LOG.debug("Building package list for updates. Incremental="+ ("True" if incremental else "False") + " Fetch since days=" + str(fetch_since_days))
+        
         use_pickled_index=True
         strListPickled = 'packages.p'
         server = xmlrpclib.Server(self._pypi_xmlrpc_url)
         if use_pickled_index and os.path.isfile(strListPickled):
             print "Loading packages.p"
             packages = pickle.load(open(strListPickled, 'rb'))
+            #return packages[0:2]
         else:
-            packages = server.list_packages()
-            try:    
+            try:
+                packages = server.list_packages()
                 if use_pickled_index:
                     pickle.dump(packages, open(strListPickled, 'wb'))
                 else:
@@ -151,11 +174,16 @@ class PypiPackageList(object):
            
 
         print "   Initial Package Count  = " + str(len(packages))
+        
+        #****************************************
+        # Return all available packages
+        #return packages
+        #****************************************
 
-        # There is a case where this script halts with no exception
+        # There is a problem where this program halts with no exception
         # so I am not sure where the code is failing yet.
         pkg_start_pos = 0
-
+        
         # This is a workaround until I locate that problem
         # This first case handles a non-incremental update:
         if not incremental and not use_pickled_index:
@@ -210,8 +238,7 @@ class PackageError(Exception):
     try:
         raise Exception
     except Exception, e:
-       print e
-       #LOG.debug("Package not available: %s" % v)
+       print e.message
     pass
 
 class Package(object):
@@ -256,32 +283,47 @@ class Package(object):
            #
            # Save the raw_html if it is larger than the existing file:
            # If someone nukes a package from the repo leaving a blank page
-           # I don't want to lost valuable information
+           # I don't want to lose valuable information
            if not os.path.exists(local_pypi_path + self.name):
                os.mkdir(local_pypi_path + self.name)
            html_info_filename = os.path.join(local_pypi_path, self.name, "info.html")
-           if (os.path.isfile(html_info_filename) and len(raw_html) > os.path.getsize(html_info_filename)) or not os.path.isfile(html_info_filename):
+           html_orig_info_filename = os.path.join(local_pypi_path, self.name, "info_orig.html")
+           if not os.path.isfile(html_orig_info_filename) and os.path.isfile(html_info_filename):
+              os.rename(html_info_filename, html_orig_info_filename)
+           if (os.path.isfile(html_info_filename) and len(raw_html) >= os.path.getsize(html_info_filename)) or not os.path.isfile(html_info_filename):
                open(html_info_filename, "wb").write(raw_html)
                LOG.debug("HTML info file written " + html_info_filename)
-           else:
-               LOG.debug("HTML info file already exists")
 
+           # Save Current XML   
+           try:
+             soup = BeautifulSoup(raw_html)
+             links = soup.findAll("a")
+             for link in links:
+                href = link.get("href")
+                if href != None and href.find('action=doap') > -1:
+                   # /pypi?:action=doap&name=YahooBoss-Python&version=0.2.0
+                   xml_filename = href.replace('/pypi?:action=doap&name=', '').replace('&version=', '-') + '.xml'
+                   xml_info_filename = os.path.join(local_pypi_path, self.name, xml_filename)
+                   if not os.path.isfile(xml_info_filename):
+                      raw_xml = urlopen('https://pypi.python.org' + href).read()
+                      open(xml_info_filename, "wb").write(raw_xml)
+                      LOG.debug("XML info file written " + xml_info_filename)
+           except:
+             LOG.debug("XML download error " + href)
+               
+               
        except Exception, e:
            raise PackageError('Generic error: %s' % e)
-           print 'Generic error: %s' % e
        #print "in _fetch_index"
        try:
            html = urlopen(self.url()).read()
        except urllib2.HTTPError, v:
            if '404' in str(v):             # sigh
-               #URL_LOG.debug('404 '+str(v))
                raise PackageError("Package not available (404): %s" % self.url())
            raise PackageError("Package not available (unknown reason): %s" % self.url())
        except urllib2.URLError, v:
-           #URL_LOG.debug("URL Error: %s " % self.url())
            raise PackageError("URL Error: %s " % self.url())
        except Exception, e:
-           URL_LOG.debug('Generic error: %s' % e)
            raise PackageError('Generic error: %s' % e)
        return html
 
@@ -375,6 +417,10 @@ class Package(object):
 
                     # and return the 20 latest files
                     candidates.sort(sort_candidates)
+                    
+                    #print len(candidates)
+                    #print candidates
+                    
                     for c in candidates[-20:][::-1]:
                         yield c
 
@@ -422,7 +468,7 @@ class Package(object):
         
         return False
 
-    def ls(self, filename_matches=None, external_links=False, follow_external_index_pages=False):
+    def ls(self, filename_matches=None, external_links=False, follow_external_index_pages=True):
         #print "in _ls"
         links = self._links(filename_matches=filename_matches, 
                             external_links=external_links, 
@@ -441,20 +487,16 @@ class Package(object):
          data = opener.read()
       except urllib2.HTTPError, v:
          if '404' in str(v):             # sigh
-            #URL_LOG.debug('404 '+str(v))
             raise PackageError("404: %s" % url)
          raise PackageError("Couldn't download (HTTP Error): %s" % url)
       except urllib2.URLError, v:
-         #URL_LOG.debug("URL Error: %s " % self.url())
          raise PackageError("URL Error: %s " % url)
       except:
-         #URL_LOG.debug("Couldn't download (unknown reason): %s" % url)
          raise PackageError("Couldn't download (unknown reason): %s" % url)
       if md5_hex:
          # check for md5 checksum
          data_md5 = md5(data).hexdigest()
          if md5_hex != data_md5:
-            #URL_LOG.debug("MD5 sum does not match: %s / %s on package %s" % (md5_hex, data_md5, url))
             raise PackageError("MD5 sum does not match: %s / %s on package %s" % (md5_hex, data_md5, url))
       return data
       
@@ -505,22 +547,24 @@ class Mirror(object):
         return MirrorPackage(self, package_name)
 
     def cleanup(self, remote_list, verbose=False):
-        local_list = self.ls()
-        for local_dir in local_list:
-            try:
-                if local_dir not in remote_list:
-                    if verbose: 
-                        LOG.debug("Removing package: %s" % local_dir)
-                    self.rmr(os.path.join(self.base_path, local_dir))
-            except UnicodeDecodeError:
-                if verbose: 
-                    LOG.debug("Removing package: %s" % local_dir)
-                self.rmr(os.path.join(self.base_path, local_dir))
+        return
+        #local_list = self.ls()
+        #for local_dir in local_list:
+        #    try:
+        #        if local_dir not in remote_list:
+        #            if verbose: 
+        #                LOG.debug("Removing package: %s" % local_dir)
+        #            self.rmr(os.path.join(self.base_path, local_dir))
+        #    except UnicodeDecodeError:
+        #        if verbose: 
+        #            LOG.debug("Removing package: %s" % local_dir)
+        #        self.rmr(os.path.join(self.base_path, local_dir))
 
     def rmr(self, path):
         """ delete a package recursively (not really.)
         """
-        shutil.rmtree(path)
+        #shutil.rmtree(path)
+        return
 
     def ls(self):
         filenames = []
@@ -569,6 +613,13 @@ class Mirror(object):
                base_url):
 
         intCounter = 0
+        filename = None
+        pkg_ctr_filename = "pkg_ctr.txt"
+        
+        if os.path.isfile(pkg_ctr_filename):
+            intCounter = int(open(pkg_ctr_filename, "r").readline()) 
+            package_list = package_list[intCounter-1:]
+        
         intTotalPackages = len(package_list)
         stats = Stats()
         full_list = []
@@ -589,7 +640,7 @@ class Mirror(object):
                                    follow_external_index_pages)
             except PackageError, v:
                 stats.error_404(package_name)
-                LOG.debug("Package not available: %s" % v)
+                LOG.debug("Package " + package_name + " not available: %s" % v)
                 continue
 
             mirror_package = self.package(package_name)
@@ -602,7 +653,7 @@ class Mirror(object):
                    url, filename = self._extract_filename(url)
                 except PackageError, v:
                    stats.error_invalid_url((url, url_basename, md5_hash))
-                   LOG.info("Invalid URL: %s" % v)
+                   LOG.info("Invalid URL: " + url + " %s" % v)
                    continue                                
                  
 
@@ -610,7 +661,7 @@ class Mirror(object):
                   # LOG.debug ("--> " + url + " [" + filename + "]")
                   # if we have a md5 check hash and continue if fine.
                   
-                  if md5_hash and mirror_package.md5_match(url_basename, md5_hash):
+                  if md5_hash and mirror_package.md5_match(url_basename, md5_hash) and os.path.exists(os.path.join(local_pypi_path, package_name, filename)):
                       stats.found(filename)
                       full_list.append(mirror_package._html_link(base_url, 
                                                                  url_basename, 
@@ -632,12 +683,11 @@ class Mirror(object):
                   # we need to download it
                   #while True:
                   try:
-                      LOG.debug(" Attempting Download: %s" % url)
+                      LOG.debug("Attempting Download: %s" % url)
                       data = package.get((url, filename, md5_hash))
                   except PackageError, v:
                       stats.error_invalid_url((url, url_basename, md5_hash))
-                      #URL_LOG.debug("Invalid URL: %s" % v)
-                      LOG.info("Invalid URL: %s" % v)
+                      LOG.info("Invalid URL: " + url + " %s" % v)
                       continue
                                         
                   mirror_package.write(filename, data, md5_hash)
@@ -646,12 +696,12 @@ class Mirror(object):
                   # url_basename
                   full_list.append(mirror_package._html_link(base_url, filename, md5_hash))
                   if verbose:
-                      LOG.debug(" Stored: %s [%d kB]" % (filename, len(data)//1024))
+                      LOG.debug("  Stored File  : %s [%d kB]" % (filename, len(data)//1024))
                   
                   fullpath_filename = os.path.join(local_pypi_path, package_name, filename)
-                  LOG.debug ("  Touching archive " + fullpath_filename)    
+                  LOG.debug ("  Touching archive: " + fullpath_filename)    
                   touch_archives.process_file(fullpath_filename, False)
-
+            open(pkg_ctr_filename, "w").write(str(intCounter-1))
 
 # Disabled cleanup for now since it does not deal with the changelog() implementation
 #            if cleanup:
@@ -660,6 +710,15 @@ class Mirror(object):
                 mirror_package.index_html(base_url)
 #        if cleanup:
 #            self.cleanup(package_list, verbose)
+
+        if os.path.isfile(pkg_ctr_filename):
+           os.remove(pkg_ctr_filename)
+        if os.path.isfile("packages.p"):
+           os.remove("packages.p")
+        if os.path.isfile("incremental_packages.p"):
+           os.remove("incremental_packages.p")
+        
+        
         if create_indexes and filename != None:
             self.index_html()
             full_list.sort()
@@ -688,8 +747,7 @@ class Mirror(object):
                fetch_url = fetch_url.replace('downloads.sourceforge.net', 'garr.dl.sourceforge.net')
                fetch_url = fetch_url.replace('?download=', '')
                url_basename = os.path.basename(fetch_url)
-               #URL_LOG.debug("Fetch URL is " + fetch_url)
-               print ("Fetch URL is " + fetch_url)
+               LOG.debug("Fetch URL is " + fetch_url)
                
             if '?' not in url_basename:
                 return [fetch_url, os.path.basename(fetch_url)]
@@ -809,14 +867,15 @@ class MirrorPackage(object):
         self.write("index.html", content)
 
     def cleanup(self, original_file_list, verbose=False):
-        remote_list = [link[1] for link in original_file_list]
-        local_list = self.ls()
-        for local_file in local_list:
-            if not local_file.endswith(".md5") and \
-                    local_file not in remote_list:
-                if verbose: 
-                    LOG.debug("Removing: %s" % local_file)
-                self.rm(local_file)
+        return
+        #remote_list = [link[1] for link in original_file_list]
+        #local_list = self.ls()
+        #for local_file in local_list:
+        #    if not local_file.endswith(".md5") and \
+        #            local_file not in remote_list:
+        #        if verbose: 
+        #            LOG.debug("Removing: %s" % local_file)
+        #        self.rm(local_file)
 
 
 class MirrorFile(object):
@@ -880,8 +939,8 @@ config_defaults = {
     'create_indexes': True, # create index.html files
     'verbose': True, # log output
     'log_filename': default_logfile,
-    'external_links': False, # experimental external link resolve and download
-    'follow_external_index_pages' : False, # experimental, scan index pages for links
+    'external_links': True, # experimental external link resolve and download
+    'follow_external_index_pages' : True, # experimental, scan index pages for links
 }
 
 
@@ -914,8 +973,8 @@ def get_config_options(config_filename):
 def run(args=None):
    
     global LOG
-    #global URL_LOG
     global local_pypi_path
+    
     usage = "usage: pypimirror [options] <config-file>"
     parser = optparse.OptionParser(usage=usage)
     parser.add_option('-v', '--verbose', dest='verbose', action='store_true',
@@ -936,17 +995,22 @@ def run(args=None):
                       default=False, help='Follow external index pages and scan for links')
     parser.add_option('-d', '--fetch-since-days', dest='fetch_since_days', action='store',
                       default=7, help='Days in past to fetch for incremental update')
+    parser.add_option('-n', '--nonstop', dest='nonstop', action='store_true',
+                      default=False, help='nonstop loop')
+    parser.add_option('-r', '--restart', dest='restart', action='store_true',
+                      default=False, help='restart with clean indexes')
     options, args = parser.parse_args()
     if len(args) != 1:
         parser.error("No configuration file specified")
         sys.exit(1)
-
+    
     config_file_name = os.path.abspath(args[0])
     config = get_config_options(config_file_name)
 
     local_pypi_path = config["mirror_file_path"]
-
+       
     # correct things from config
+    nonstop = options.nonstop
     filename_matches = config["filename_matches"].split()
     package_matches = config["package_matches"].split()
     cleanup = config["cleanup"] in ("True", "1")
@@ -955,9 +1019,29 @@ def run(args=None):
     external_links = config["external_links"] in ("True", "1") or options.external_links
     follow_external_index_pages = config["follow_external_index_pages"] in ("True", "1") or options.follow_external_index_pages
     log_filename = config['log_filename']
-    fetch_since_days = int(config.get("fetch_since_days", 0) or options.fetch_since_days)
+    
+    
+    if int(options.fetch_since_days) > 0:
+       fetch_since_days = int(options.fetch_since_days)
+    else:
+       fetch_since_days = int(config.get("fetch_since_days", 0) or options.fetch_since_days)
+    
+    
     if options.log_filename:
         log_filename = options.log_filename
+
+    LOG = getLogger(filename=log_filename, log_console=options.log_console)
+
+
+    if options.restart:
+        LOG.debug ("Erasing old package data and restarting")
+        if os.path.isfile("pkg_ctr.txt"):
+           os.remove("pkg_ctr.txt")
+        if os.path.isfile("packages.p"):
+           os.remove("packages.p")
+        if os.path.isfile("incremental_packages.p"):
+           os.remove("incremental_packages.p")
+      
 
     if options.initial_fetch:
         package_list = PypiPackageList().list(package_matches, incremental=False)
@@ -970,22 +1054,32 @@ def run(args=None):
     
     lock = zc.lockfile.LockFile(os.path.join(config["mirror_file_path"], config["lock_file_name"]))
     
-    LOG = getLogger(filename=log_filename, log_console=options.log_console)
 
     try:
         if options.indexes_only:
             mirror.index_html()
         else:
-            mirror.mirror(package_list, 
-                          filename_matches, 
-                          verbose, 
-                          cleanup, 
-                          create_indexes, 
-                          external_links, 
-                          follow_external_index_pages,
-                          config["base_url"])
+            while True:
+                try:
+                    mirror.mirror(package_list, filename_matches, verbose, 
+                                  cleanup, create_indexes, external_links, 
+                                  follow_external_index_pages, config["base_url"])
+                except Exception as e:
+                   LOG.debug(GetExceptionInfo())
+                   print GetExceptionInfo()
+                if not nonstop:
+                   break
+                else:
+                   LOG.debug('Pausing for repeat...')
+                   time.sleep(60 * 60 * 24) # 60 secs * 60 minutes = 1 Hour * Number of Hours to Pause
+                   if options.initial_fetch:
+                       package_list = PypiPackageList().list(package_matches, incremental=False)
+                   elif options.update_fetch:
+                       package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_days=fetch_since_days)
+                   else: 
+                       raise ValueError('You must either specify the --initial-fetch or --update-fetch option ')
     except:
-        pass
+       LOG.debug(GetExceptionInfo())
 
 if __name__ == '__main__':
     sys.exit(run())
