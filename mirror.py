@@ -612,21 +612,21 @@ class Mirror(object):
                follow_external_index_pages, 
                base_url):
 
-        intCounter = 0
+        cur_pkg_counter = 0
         filename = None
-        pkg_ctr_filename = "pkg_ctr.txt"
         
+        pkg_ctr_filename = "pkg_ctr.txt"        
         if os.path.isfile(pkg_ctr_filename):
-            intCounter = int(open(pkg_ctr_filename, "r").readline()) 
-            package_list = package_list[intCounter-1:]
+            cur_pkg_counter = int(open(pkg_ctr_filename, "r").readline()) 
+            package_list = package_list[cur_pkg_counter-1:]
         
-        intTotalPackages = len(package_list)
+        total_pkg_count = len(package_list)+cur_pkg_counter
         stats = Stats()
         full_list = []
         for package_name in package_list:
 
-            intCounter += 1
-            LOG.debug('Processing package %s (%s of %s)' % (package_name, str(intCounter), str(intTotalPackages)))
+            cur_pkg_counter += 1
+            LOG.debug('Processing package %s (%s of %s)' % (package_name, str(cur_pkg_counter), str(total_pkg_count)))
 
             try:
                 package = Package(package_name)
@@ -701,7 +701,7 @@ class Mirror(object):
                   fullpath_filename = os.path.join(local_pypi_path, package_name, filename)
                   LOG.debug ("  Touching archive: " + fullpath_filename)    
                   touch_archives.process_file(fullpath_filename, False)
-            open(pkg_ctr_filename, "w").write(str(intCounter-1))
+            open(pkg_ctr_filename, "w").write(str(cur_pkg_counter-1))
 
 # Disabled cleanup for now since it does not deal with the changelog() implementation
 #            if cleanup:
@@ -734,7 +734,7 @@ class Mirror(object):
         """
         fetch_url = url
         #old_fetch_url = ""
-        intCounter = 0
+        extract_counter = 0
         do_again = True
         while do_again:
             # heuristics start
@@ -752,11 +752,11 @@ class Mirror(object):
             if '?' not in url_basename:
                 return [fetch_url, os.path.basename(fetch_url)]
 
-            if intCounter > 15:
+            if extract_counter > 15:
                 return [None, None]
             # now we have get parameters, we need to do a head 
             # request to get the filename
-            intCounter += 1
+            extract_counter += 1
             try:
                 LOG.debug("Head-Request to get filename for %s" % fetch_url)
                 parsed_url = urlparse.urlparse(fetch_url)
