@@ -154,6 +154,8 @@ class PypiPackageList(object):
     def list(self, filter_by=None, incremental=False, fetch_since_days=7):
         LOG.debug("Building package list for updates. Incremental="+ ("True" if incremental else "False") + " Fetch since days=" + str(fetch_since_days))
         
+        #return ['cpppo']  
+        
         use_pickled_index=True
         strListPickled = 'packages.p'
         server = xmlrpclib.Server(self._pypi_xmlrpc_url)
@@ -280,6 +282,21 @@ class Package(object):
            #print 'https://pypi.python.org/pypi/' + self.name + '/'
            raw_html = urlopen('https://pypi.python.org/pypi/' + self.name + '/').read()
            
+           
+           
+           if raw_html.find('Index of Packages') > -1:
+              try:
+                 soup = BeautifulSoup(raw_html)
+                 links = soup.findAll("a")
+                 for link in links:
+                    href = link.get("href")
+                    if href != None and href.find('/pypi/' + self.name + '/') > -1:
+                       raw_html = urlopen('https://pypi.python.org' + href).read()
+                       break
+              except:
+                 LOG.debug("HTML download error " + href)
+              
+           
            #
            # Save the raw_html if it is larger than the existing file:
            # If someone nukes a package from the repo leaving a blank page
@@ -308,6 +325,7 @@ class Package(object):
                       raw_xml = urlopen('https://pypi.python.org' + href).read()
                       open(xml_info_filename, "wb").write(raw_xml)
                       LOG.debug("XML info file written " + xml_info_filename)
+                   break
            except:
              LOG.debug("XML download error " + href)
                
@@ -1071,7 +1089,7 @@ def run(args=None):
                    break
                 else:
                    LOG.debug('Pausing for repeat...')
-                   time.sleep(60 * 60 * 24) # 60 secs * 60 minutes = 1 Hour * Number of Hours to Pause
+                   time.sleep(60 * 60 * 23) # 60 secs * 60 minutes = 1 Hour * Number of Hours to Pause
                    if options.initial_fetch:
                        package_list = PypiPackageList().list(package_matches, incremental=False)
                    elif options.update_fetch:
