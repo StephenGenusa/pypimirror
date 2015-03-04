@@ -29,6 +29,17 @@
 #
 # Modifications March 2015 by Stephen Genusa
 # 1) Saves DOAP XML file for current package
+# 2) -H param added to set incremental update time by hours rather than
+#      the limited -d Days parameter
+# 3) Can determine hours since last update (based on the date/time of the log)
+#      using the -a parameter
+#
+# Example usage:
+#   python mirror.py -v -c -U -r -a pypimirror.cfg
+#     (verbose, log to console, Update fetch, restart with fresh PyPi package
+#      data, automatically determine time to begin refresh from)
+#
+#
 
 
 
@@ -151,8 +162,9 @@ class PypiPackageList(object):
     def __init__(self, pypi_xmlrpc_url='http://pypi.python.org/pypi'):
         self._pypi_xmlrpc_url = pypi_xmlrpc_url
 
-    def list(self, filter_by=None, incremental=False, fetch_since_days=7):
-        LOG.debug("Building package list for updates. Incremental="+ ("True" if incremental else "False") + " Fetch since days=" + str(fetch_since_days))
+    def list(self, filter_by=None, incremental=False, fetch_since_days=7, fetch_since_hours=0):
+        print time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + (" " * 12) + "Building package list for updates. "+ ("Incremental" if incremental else "Non-Incremental") + \
+              (" Fetch since hours=" + str(fetch_since_hours) if fetch_since_hours > 0 else " fetch since days=" + str(fetch_since_days))
         
         #return ['cpppo']  
         
@@ -220,7 +232,10 @@ class PypiPackageList(object):
          
         if incremental:
             socket.setdefaulttimeout(120)
-            changelog = server.changelog(int(time.time() - fetch_since_days*24*3600))
+            if fetch_since_hours > 0:
+               changelog = server.changelog(int(time.time() - fetch_since_hours*3600))
+            else:
+               changelog = server.changelog(int(time.time() - fetch_since_days*24*3600))
             changed_packages = [tp[0] for tp in changelog 
                                 if 'file' in tp[3]]
             changed_packages = [package for package in changed_packages if package in filtered_packages]
@@ -318,7 +333,6 @@ class Package(object):
              for link in links:
                 href = link.get("href")
                 if href != None and href.find('action=doap') > -1:
-                   # /pypi?:action=doap&name=YahooBoss-Python&version=0.2.0
                    xml_filename = href.replace('/pypi?:action=doap&name=', '').replace('&version=', '-') + '.xml'
                    xml_info_filename = os.path.join(local_pypi_path, self.name, xml_filename)
                    if not os.path.isfile(xml_info_filename):
@@ -863,9 +877,8 @@ class MirrorPackage(object):
         return filenames
 
     def _html_link(self, base_url, filename, md5_hash):
-        if not base_url.endswith('/'):
-            base_url += '/'
-        return '<a href="%s%s/%s#md5=%s">%s</a>' % (base_url, self.package_name, filename, md5_hash, filename)
+        base_url = ''
+        return '<a href="%s">%s</a>' % (filename, filename)
 
     def _index_html(self, base_url):
         header = "<html><head><title>%s &ndash; PyPI Mirror</title></head><body>" % self.package_name
@@ -1013,6 +1026,10 @@ def run(args=None):
                       default=False, help='Follow external index pages and scan for links')
     parser.add_option('-d', '--fetch-since-days', dest='fetch_since_days', action='store',
                       default=7, help='Days in past to fetch for incremental update')
+    parser.add_option('-H', '--fetch-since-hours', dest='fetch_since_hours', action='store',
+                      default=0, help='Hours in past to fetch for incremental update')
+    parser.add_option('-a', '--autocalc', dest='autocalc', action='store_true',
+                      default=False, help='Automatically calc how many hours since last run')
     parser.add_option('-n', '--nonstop', dest='nonstop', action='store_true',
                       default=False, help='nonstop loop')
     parser.add_option('-r', '--restart', dest='restart', action='store_true',
@@ -1038,12 +1055,18 @@ def run(args=None):
     follow_external_index_pages = config["follow_external_index_pages"] in ("True", "1") or options.follow_external_index_pages
     log_filename = config['log_filename']
     
+    if options.autocalc:
+       seconds_past = time.time() - os.path.getmtime(log_filename)
+       hours_past = seconds_past / 3600
+       if hours_past > 0:
+         options.fetch_since_hours = hours_past + 1
     
     if int(options.fetch_since_days) > 0:
        fetch_since_days = int(options.fetch_since_days)
     else:
        fetch_since_days = int(config.get("fetch_since_days", 0) or options.fetch_since_days)
     
+    fetch_since_hours = int(options.fetch_since_hours)   
     
     if options.log_filename:
         log_filename = options.log_filename
@@ -1052,7 +1075,7 @@ def run(args=None):
 
 
     if options.restart:
-        LOG.debug ("Erasing old package data and restarting")
+        print time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + (" " * 12) + "Erasing old package data and restarting"
         if os.path.isfile("pkg_ctr.txt"):
            os.remove("pkg_ctr.txt")
         if os.path.isfile("packages.p"):
@@ -1064,7 +1087,11 @@ def run(args=None):
     if options.initial_fetch:
         package_list = PypiPackageList().list(package_matches, incremental=False)
     elif options.update_fetch:
-        package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_days=fetch_since_days)
+        if fetch_since_hours > 0:
+           package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_days=0, fetch_since_hours=fetch_since_hours)
+        else: 
+           package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_days=fetch_since_days)
+        
     else: 
         raise ValueError('You must either specify the --initial-fetch or --update-fetch option ')
 
@@ -1088,14 +1115,13 @@ def run(args=None):
                 if not nonstop:
                    break
                 else:
-                   LOG.debug('Pausing for repeat...')
-                   time.sleep(60 * 60 * 23) # 60 secs * 60 minutes = 1 Hour * Number of Hours to Pause
-                   if options.initial_fetch:
-                       package_list = PypiPackageList().list(package_matches, incremental=False)
-                   elif options.update_fetch:
-                       package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_days=fetch_since_days)
-                   else: 
-                       raise ValueError('You must either specify the --initial-fetch or --update-fetch option ')
+                   LOG.debug('Pausing ' + (str(fetch_since_hours) + ' hours ' if fetch_since_hours > 0 else '24 hours ') + 'for repeat... ')
+                   if fetch_since_hours > 0:
+                       time.sleep(3600 * fetch_since_hours) # 60 secs * 60 minutes = 1 Hour * Number of Hours to Pause
+                       package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_hours=fetch_since_hours)
+                   else:
+                       time.sleep(3600 * 24)
+                       package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_days=1)
     except:
        LOG.debug(GetExceptionInfo())
 
