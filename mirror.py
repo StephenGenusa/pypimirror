@@ -1,3 +1,4 @@
+#! /usr/bin/env python
 ################################################################
 # z3c.pypimirror - A PyPI mirroring solution
 # Written by Daniel Kraft, Josip Delic, Gottfried Ganssauge and
@@ -102,13 +103,13 @@ def GetExceptionInfo():
     return 'EXCEPTION IN ({}, LINE {} "{}"): {}'.format(filename, lineno, line.strip(), exc_obj)
 
 
-
 def urlopen(url):
     """ This behave exactly like urllib2.urlopen, but injects a header
     """
     headers = {'User-Agent' : 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/33.0.1750.154 Safari/537.36'}
     req = urllib2.Request(url, None, headers)
     return urllib2.urlopen(req)
+
 
 class Stats(object):
     """ This is just for statistics """
@@ -166,7 +167,8 @@ class PypiPackageList(object):
         print time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + (" " * 12) + "Building package list for updates. "+ ("Incremental" if incremental else "Non-Incremental") + \
               (" Fetch since hours=" + str(fetch_since_hours) if fetch_since_hours > 0 else " fetch since days=" + str(fetch_since_days))
         
-        #return ['cpppo']  
+        #Debug using a single package
+        #return ['Custom-Interactive-Console']  
         
         use_pickled_index=True
         strListPickled = 'packages.p'
@@ -189,10 +191,12 @@ class PypiPackageList(object):
 
         print "   Initial Package Count  = " + str(len(packages))
         
-        #****************************************
+        ##########################################
         # Return all available packages
         #return packages
-        #****************************************
+        ##########################################
+
+        #return packages
 
         # There is a problem where this program halts with no exception
         # so I am not sure where the code is failing yet.
@@ -336,7 +340,7 @@ class Package(object):
                    xml_filename = href.replace('/pypi?:action=doap&name=', '').replace('&version=', '-') + '.xml'
                    xml_info_filename = os.path.join(local_pypi_path, self.name, xml_filename)
                    if not os.path.isfile(xml_info_filename):
-                      raw_xml = urlopen('https://pypi.python.org' + href).read()
+                      raw_xml = urlopen('https://pypi.python.org' + href.replace(' ', '%20')).read()
                       open(xml_info_filename, "wb").write(raw_xml)
                       LOG.debug("XML info file written " + xml_info_filename)
                    break
@@ -693,7 +697,8 @@ class Mirror(object):
                   # LOG.debug ("--> " + url + " [" + filename + "]")
                   # if we have a md5 check hash and continue if fine.
                   
-                  if md5_hash and mirror_package.md5_match(url_basename, md5_hash) and os.path.exists(os.path.join(local_pypi_path, package_name, filename)):
+                  if (md5_hash and mirror_package.md5_match(url_basename, md5_hash)) or \
+                     os.path.exists(os.path.join(local_pypi_path, package_name, filename)):
                       stats.found(filename)
                       full_list.append(mirror_package._html_link(base_url, 
                                                                  url_basename, 
@@ -964,7 +969,7 @@ config_defaults = {
     'base_url': 'http://your-host.com/index/',
     'mirror_file_path': '/tmp/mirror',
     'lock_file_name': 'pypi-poll-access.lock',
-    'filename_matches': '*.zip *.tgz *.egg *.tar.gz *.tar.bz2', # may be "" for *
+    'filename_matches': '*.zip *.tgz *.egg *.tar.gz *.tar.bz2 *.whl *.py *.md *.md5 *.xml *.sha1', # may be "" for *
     'package_matches': "", # "zope.app.* plone.app.*", # may be "" for *
     'cleanup': False, # delete local copies that are remotely not available
     'create_indexes': True, # create index.html files
@@ -1009,7 +1014,7 @@ def run(args=None):
     usage = "usage: pypimirror [options] <config-file>"
     parser = optparse.OptionParser(usage=usage)
     parser.add_option('-v', '--verbose', dest='verbose', action='store_true',
-                      default=False, help='verbose on')
+                      default=True, help='verbose on')
     parser.add_option('-f', '--log-filename', dest='log_filename', action='store',
                       default=False, help='Name of logfile')
     parser.add_option('-I', '--initial-fetch', dest='initial_fetch', action='store_true',
@@ -1017,11 +1022,11 @@ def run(args=None):
     parser.add_option('-U', '--update-fetch', dest='update_fetch', action='store_true',
                       default=False, help='Perform incremental update of the mirror')
     parser.add_option('-c', '--log-console', dest='log_console', action='store_true',
-                      default=False, help='Also log to console')
+                      default=True, help='Also log to console')
     parser.add_option('-i', '--indexes-only', dest='indexes_only', action='store_true',
                       default=False, help='create indexes only (no mirroring)')
     parser.add_option('-e', '--follow-external-links', dest='external_links', action='store_true',
-                      default=False, help='Follow and download external links)')
+                      default=True, help='Follow and download external links)')
     parser.add_option('-x', '--follow-external-index-pages', dest='follow_external_index_pages', action='store_true',
                       default=False, help='Follow external index pages and scan for links')
     parser.add_option('-d', '--fetch-since-days', dest='fetch_since_days', action='store',
@@ -1029,7 +1034,7 @@ def run(args=None):
     parser.add_option('-H', '--fetch-since-hours', dest='fetch_since_hours', action='store',
                       default=0, help='Hours in past to fetch for incremental update')
     parser.add_option('-a', '--autocalc', dest='autocalc', action='store_true',
-                      default=False, help='Automatically calc how many hours since last run')
+                      default=False, help='Automatically calc how many hours since last run and fetch based on that time')
     parser.add_option('-n', '--nonstop', dest='nonstop', action='store_true',
                       default=False, help='nonstop loop')
     parser.add_option('-r', '--restart', dest='restart', action='store_true',
@@ -1115,12 +1120,12 @@ def run(args=None):
                 if not nonstop:
                    break
                 else:
-                   LOG.debug('Pausing ' + (str(fetch_since_hours) + ' hours ' if fetch_since_hours > 0 else '24 hours ') + 'for repeat... ')
+                   LOG.debug('Pausing ' + (str(fetch_since_hours) + ' hours ' if fetch_since_hours > 0 else '23 hours ') + 'for repeat... ')
                    if fetch_since_hours > 0:
                        time.sleep(3600 * fetch_since_hours) # 60 secs * 60 minutes = 1 Hour * Number of Hours to Pause
                        package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_hours=fetch_since_hours)
                    else:
-                       time.sleep(3600 * 24)
+                       time.sleep(3600 * 23)
                        package_list = PypiPackageList().list(package_matches, incremental=True, fetch_since_days=1)
     except:
        LOG.debug(GetExceptionInfo())
