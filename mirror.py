@@ -437,7 +437,7 @@ class Package(object):
                     for real_download_link in real_download_links:
                         # build absolute links
 
-                        real_download_link = urllib.basejoin(site.url, real_download_link)
+                        real_download_link = urllib.basejoin(r.url, real_download_link)
                         if not filename_matches or self.matches(real_download_link, filename_matches):
 
                             # we're not interested in dev packages
