@@ -41,39 +41,46 @@
 #      data, automatically determine time to begin refresh from)
 #
 #
+# Modifications May 2015 by Stephen Genusa
+# 1) urlopen has finally died the death due to SSL changes on PyPi. I've 
+#    done a rough replacement of urlopen with the requests module to get the
+#    utility functioning again. More cleanup is needed now.
 
 
-
-import re
-import os
-import xmlrpclib
-import sys
-import util
-import shutil
-import httplib
-import urllib 
-import urllib2
-import time
 import datetime
 import ConfigParser
+import httplib
 import optparse
-import zc.lockfile
+import pickle
+import pkg_resources
+import os
+import re
+import sys
+import shutil
 import socket
 import tempfile
+import time
+import urllib 
+import urllib2
 import urlparse
-import pkg_resources
-import pickle
+import util
+from xml.dom.minidom import parseString
+import xmlrpclib
+
+try: 
+    from hashlib import md5
+except ImportError:
+    from md5 import md5
+
 from BeautifulSoup import BeautifulSoup
 from glob import fnmatch
-from logger import getLogger
 import HTMLParser
-import time
-import touch_archives
 import linecache
-try: 
-   from hashlib import md5
-except ImportError:
-   from md5 import md5
+from logger import getLogger
+import requests
+import touch_archives
+import zc.lockfile
+
 
 
 # timeout in seconds
@@ -102,13 +109,6 @@ def GetExceptionInfo():
     line = linecache.getline(filename, lineno, f.f_globals)
     return 'EXCEPTION IN ({}, LINE {} "{}"): {}'.format(filename, lineno, line.strip(), exc_obj)
 
-
-def urlopen(url):
-    """ This behave exactly like urllib2.urlopen, but injects a header
-    """
-    headers = {'User-Agent' : 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/33.0.1750.154 Safari/537.36'}
-    req = urllib2.Request(url, None, headers)
-    return urllib2.urlopen(req)
 
 
 class Stats(object):
@@ -299,8 +299,8 @@ class Package(object):
        try:
            #print 
            #print 'https://pypi.python.org/pypi/' + self.name + '/'
-           raw_html = urlopen('https://pypi.python.org/pypi/' + self.name + '/').read()
-           
+           r = requests.get('https://pypi.python.org/pypi/' + self.name + '/')
+           raw_html = r.content          
            
            
            if raw_html.find('Index of Packages') > -1:
@@ -310,7 +310,8 @@ class Package(object):
                  for link in links:
                     href = link.get("href")
                     if href != None and href.find('/pypi/' + self.name + '/') > -1:
-                       raw_html = urlopen('https://pypi.python.org' + href).read()
+                       r = requests.get('https://pypi.python.org' + href)
+                       raw_html = r.content 
                        break
               except:
                  LOG.debug("HTML download error " + href)
@@ -340,9 +341,12 @@ class Package(object):
                    xml_filename = href.replace('/pypi?:action=doap&name=', '').replace('&version=', '-') + '.xml'
                    xml_info_filename = os.path.join(local_pypi_path, self.name, xml_filename)
                    if not os.path.isfile(xml_info_filename):
-                      raw_xml = urlopen('https://pypi.python.org' + href.replace(' ', '%20')).read()
+                      r = requests.get('https://pypi.python.org' + href.replace(' ', '%20')) 
+                      raw_xml = r.content
                       open(xml_info_filename, "wb").write(raw_xml)
                       LOG.debug("XML info file written " + xml_info_filename)
+                      dom3 = parseString(raw_xml)
+                      LOG.debug('*' * 3 + ' ' + dom3.getElementsByTagName('shortdesc')[0].firstChild.data + ' ' + '*' * 3)                     
                    break
            except:
              LOG.debug("XML download error " + href)
@@ -352,7 +356,8 @@ class Package(object):
            raise PackageError('Generic error: %s' % e)
        #print "in _fetch_index"
        try:
-           html = urlopen(self.url()).read()
+           r = requests.get(self.url())
+           html = r.content
        except urllib2.HTTPError, v:
            if '404' in str(v):             # sigh
                raise PackageError("Package not available (404): %s" % self.url())
@@ -415,17 +420,18 @@ class Package(object):
 
                 if follow_external_index_pages:
                     try:
-                        site = urlopen(link)
+                        r = requests.get(link)
+                        #site = urlopen()
                     except Exception, e:
-                        LOG.warn('Unload downloading %s (%s)' % (link, e))
+                        LOG.warn('Error downloading %s (%s)' % (link, e))
                         continue
 
-                    if site.headers.type != "text/html":
+                    if "text/html" not in r.headers['content-type']: 
                         continue
 
                     # we have a valid html page now. Parse links and download them.
                     # They have mostly no md5 hash.
-                    html = site.read()
+                    html = r.content
                     real_download_links = self._fetch_links(html)
                     candidates = list()
                     for real_download_link in real_download_links:
@@ -517,18 +523,14 @@ class Package(object):
       """
       # since some time in Feb 2009 PyPI uses different and relative URLs
       if url.startswith('../../packages'):
-         url = 'http://pypi.python.org/' + url[6:]
+         url = 'https://pypi.python.org/' + url[6:]
+         #print "url is --> ", url
+         #print "filename is -->", filename
       try:
-         opener = urlopen(url)
-         data = opener.read()
-      except urllib2.HTTPError, v:
-         if '404' in str(v):             # sigh
-            raise PackageError("404: %s" % url)
-         raise PackageError("Couldn't download (HTTP Error): %s" % url)
-      except urllib2.URLError, v:
-         raise PackageError("URL Error: %s " % url)
-      except:
-         raise PackageError("Couldn't download (unknown reason): %s" % url)
+         r = requests.get(url)
+         data = r.content
+      except Exception as e:
+         raise PackageError("Couldn't download (%s): %s" % (e, url))
       if md5_hex:
          # check for md5 checksum
          data_md5 = md5(data).hexdigest()
@@ -549,11 +551,13 @@ class Package(object):
 
         #print "in content_length"
         try:
-            parts = urlparse.urlsplit(link)
-            c = httplib.HTTPConnection(parts[1])
-            c.request('HEAD', parts[2])
-            response = c.getresponse()
-            ct = response.getheader('content-length')
+            r = requests.head(link)
+            ct = r.headers['content-length']
+            #parts = urlparse.urlsplit(link)
+            #c = httplib.HTTPConnection(parts[1])
+            #c.request('HEAD', parts[2])
+            #response = c.getresponse()
+            #ct = response.getheader('content-length')
             if ct is not None:
                 ct = long(ct)
                 return ct
@@ -561,7 +565,8 @@ class Package(object):
             LOG.warn('Could not obtain content-length through a HEAD request from %s (%s)' % (link, e))
 
         try:
-            return long(urlopen(link).headers.get("content-length"))
+            r = requests.head(link)
+            return long(r.headers['content-length'])
         except:
             return 0
 
@@ -1064,7 +1069,7 @@ def run(args=None):
        seconds_past = time.time() - os.path.getmtime(log_filename)
        hours_past = seconds_past / 3600
        if hours_past > 0:
-         options.fetch_since_hours = hours_past + 1
+         options.fetch_since_hours = hours_past + 3
     
     if int(options.fetch_since_days) > 0:
        fetch_since_days = int(options.fetch_since_days)
