@@ -21,6 +21,7 @@ Modifications March 2015
 3. -a param determines hours since last update (based on the date/time of the log) and begins fetch at that point in time
 
 Modifications May 2015 by Stephen Genusa
+
 1. urllib2.urlopen has finally died the death due to SSL changes on PyPi. I've done a rough replacement of urlopen with the requests module to get the utility functioning again. More cleanup is needed now but it is back in business.
 
 
