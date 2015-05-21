@@ -46,17 +46,27 @@
 #      done a rough replacement of urlopen with the requests module to get the
 #      utility functioning again. More cleanup is needed now.
 # 2) (a) Adds a final / to the end of the 'simple' URL (b) also calls .lower() on 
-#      the package name and (c) changed http to https to end the -3- unnecessary
-#      301 redirects and just get the files we want on the first call
+#      the package name (c) changed http to https and (d) changes '_' to '-'. These
+#      changes put an end to -5- frequent but unnecessary 301 redirects and the 
+#      proper URL is now requested on the first call
+# 3) Detects when HTML (custom 404 pages) are returned rather than the requested
+#      binary package file and does not save these invalid files
 
 
+# Standard Library Modules
 import datetime
 import ConfigParser
+try: 
+    from hashlib import md5
+except ImportError:
+    from md5 import md5
+from glob import fnmatch
 import httplib
+import linecache
 import optparse
-import pickle
-import pkg_resources
 import os
+import pickle
+import pkg_resources # setuptools
 import re
 import sys
 import shutil
@@ -70,29 +80,22 @@ import util
 from xml.dom.minidom import parseString
 import xmlrpclib
 
-try: 
-    from hashlib import md5
-except ImportError:
-    from md5 import md5
-
+# 3rd Party Project Modules
 from BeautifulSoup import BeautifulSoup
-from glob import fnmatch
 import HTMLParser
-import linecache
-from logger import getLogger
 import requests
-import touch_archives
 import zc.lockfile
 
+# Internal Project Modules
+from logger import getLogger
+import touch_archives
 
 
-# timeout in seconds
-timeout = 10
-socket.setdefaulttimeout(timeout)
 
 LOG = None
-
 dev_package_regex = re.compile(r'\ddev[-_]')
+
+
 
 def pypimirror_version():
     """
@@ -170,9 +173,12 @@ class PypiPackageList(object):
         print time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + (" " * 12) + "Building package list for updates. "+ ("Incremental" if incremental else "Non-Incremental") + \
               (" Fetch since hours=" + str(fetch_since_hours) if fetch_since_hours > 0 else " fetch since days=" + str(fetch_since_days))
         
-        #Debug using a single package
+        socket.setdefaulttimeout(30)
+        ##########################################
+        # Debug using a single package
         #return ['Custom-Interactive-Console']  
-        
+        ##########################################
+        #return ['Custom-Interactive-Console']  
         use_pickled_index=True
         strListPickled = 'packages.p'
         server = xmlrpclib.Server(self._pypi_xmlrpc_url)
@@ -198,14 +204,13 @@ class PypiPackageList(object):
         # Return all available packages
         #return packages
         ##########################################
-
         #return packages
 
         # There is a problem where this program halts with no exception
         # so I am not sure where the code is failing yet.
+        # This is a workaround until I locate that problem
         pkg_start_pos = 0
         
-        # This is a workaround until I locate that problem
         # This first case handles a non-incremental update:
         if not incremental and not use_pickled_index:
             packages = list(set(packages))
@@ -217,7 +222,8 @@ class PypiPackageList(object):
         # built it returns that so that 1) the list does not have to 
         # be rebuilt and 2) you can pickup from the point of failure
         # by changing pkg_start_pos to the last good package number
-        # shown in the previous run
+        # shown in the previous run. You can also do a resume after
+        # a CTRL-C
         if incremental:
             strIncrementalPickled = "incremental_" + strListPickled
             if use_pickled_index and os.path.isfile(strIncrementalPickled):
@@ -238,7 +244,6 @@ class PypiPackageList(object):
         print "   Filtered Package Count = " + str(len(filtered_packages))
          
         if incremental:
-            socket.setdefaulttimeout(120)
             if fetch_since_hours > 0:
                changelog = server.changelog(int(time.time() - fetch_since_hours*3600))
             else:
@@ -252,7 +257,6 @@ class PypiPackageList(object):
                 pickle.dump(changed_packages, open("incremental_" + strListPickled, 'wb'))
             return changed_packages
         else:
-            socket.setdefaulttimeout(120)
             filtered_packages = list(set(filtered_packages))
             print "Filtered Package Count(2) = " + str(len(filtered_packages))
             return filtered_packages
@@ -291,17 +295,15 @@ class Package(object):
                 filename = urllib.quote(filename)
             except KeyError:
                 raise PackageError("%s is not a valid filename." % filename)
-        url = "%s/%s/" % (self._pypi_base_url, self.name.lower())
+        url = "%s/%s/" % (self._pypi_base_url, self.name.lower().replace('_', '-'))
         #print "--> ", url
         if filename:
             url = "%s/%s" % (url, filename)
         return url
 
     def _fetch_index(self):
-       #print "in _raw_html"
+       #print "in _fetch_index"
        try:
-           #print 
-           #print 'https://pypi.python.org/pypi/' + self.name + '/'
            r = requests.get('https://pypi.python.org/pypi/' + self.name + '/')
            raw_html = r.content          
            
@@ -320,10 +322,7 @@ class Package(object):
                  LOG.debug("HTML download error " + href)
               
            
-           #
-           # Save the raw_html if it is larger than the existing file:
-           # If someone nukes a package from the repo leaving a blank page
-           # I don't want to lose valuable information
+           # Save the raw_html
            if not os.path.exists(local_pypi_path + self.name):
                os.mkdir(local_pypi_path + self.name)
            html_info_filename = os.path.join(local_pypi_path, self.name, "info.html")
@@ -334,7 +333,7 @@ class Package(object):
                open(html_info_filename, "wb").write(raw_html)
                LOG.debug("HTML info file written " + html_info_filename)
 
-           # Save Current XML   
+           # Save Current XML DOAP Record   
            try:
              soup = BeautifulSoup(raw_html)
              links = soup.findAll("a")
@@ -460,7 +459,7 @@ class Package(object):
                         parts2 = urlparse.urlsplit(url2)[2].split('/')[-1]
                         return cmp(pkg_resources.parse_version(parts1), pkg_resources.parse_version(parts2))
 
-                    # and return the 20 latest files
+                    # sort the files
                     candidates.sort(sort_candidates)
                     
                     #print len(candidates)
@@ -531,6 +530,8 @@ class Package(object):
          #print "filename is -->", filename
       try:
          r = requests.get(url)
+         if 'text/html' in r.headers['content-type']:
+             raise PackageError("File no longer exists. HTML returned rather than package.")
          data = r.content
       except Exception as e:
          raise PackageError("Couldn't download (%s): %s" % (e, url))
@@ -556,22 +557,13 @@ class Package(object):
         try:
             r = requests.head(link)
             ct = r.headers['content-length']
-            #parts = urlparse.urlsplit(link)
-            #c = httplib.HTTPConnection(parts[1])
-            #c.request('HEAD', parts[2])
-            #response = c.getresponse()
-            #ct = response.getheader('content-length')
             if ct is not None:
                 ct = long(ct)
                 return ct
         except Exception, e:
             LOG.warn('Could not obtain content-length through a HEAD request from %s (%s)' % (link, e))
 
-        try:
-            r = requests.head(link)
-            return long(r.headers['content-length'])
-        except:
-            return 0
+        return 0
 
 class Mirror(object):
     """ This represents the whole mirror directory
@@ -592,22 +584,8 @@ class Mirror(object):
 
     def cleanup(self, remote_list, verbose=False):
         return
-        #local_list = self.ls()
-        #for local_dir in local_list:
-        #    try:
-        #        if local_dir not in remote_list:
-        #            if verbose: 
-        #                LOG.debug("Removing package: %s" % local_dir)
-        #            self.rmr(os.path.join(self.base_path, local_dir))
-        #    except UnicodeDecodeError:
-        #        if verbose: 
-        #            LOG.debug("Removing package: %s" % local_dir)
-        #        self.rmr(os.path.join(self.base_path, local_dir))
 
     def rmr(self, path):
-        """ delete a package recursively (not really.)
-        """
-        #shutil.rmtree(path)
         return
 
     def ls(self):
@@ -756,6 +734,8 @@ class Mirror(object):
 #        if cleanup:
 #            self.cleanup(package_list, verbose)
 
+        # The pass has completed successfully so delete the temporary
+        # counter and the pickled package-list files 
         if os.path.isfile(pkg_ctr_filename):
            os.remove(pkg_ctr_filename)
         if os.path.isfile("packages.p"):
@@ -763,7 +743,7 @@ class Mirror(object):
         if os.path.isfile("incremental_packages.p"):
            os.remove("incremental_packages.p")
         
-        
+        # Generate the local HTML pages
         if create_indexes and filename != None:
             self.index_html()
             full_list.sort()

@@ -22,8 +22,9 @@ Modifications March 2015
 
 Modifications May 2015
 
-1. urllib2.urlopen has finally died the death due to SSL changes on PyPi. I've done a rough replacement of urlopen with the requests module to get the utility functioning again. More cleanup is needed now but it is back in business.
-2. (a) Adds a final / to the end of the 'simple' URL (b) also calls .lower() on the package name and (c) changed http to https to end the -3- unnecessary 301 redirects and just get the files we want on the first call
+1. urllib2.urlopen has finally died the death due to SSL changes on PyPi. I've done a rough replacement of urlopen with the requests module to get the utility functioning again. More cleanup is needed now.
+2. (a) Adds a final / to the end of the 'simple' URL (b) also calls .lower() on the package name (c) changed http to https and (d) changes '_' to '-'. These changes put an end to -5- frequent but unnecessary 301 redirects and the proper URL is now requested on the first call
+3. Detects when HTML (custom 404 pages) are returned rather than the requested binary package file and does not save these invalid files
 
 
 
