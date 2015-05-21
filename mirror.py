@@ -42,9 +42,12 @@
 #
 #
 # Modifications May 2015 by Stephen Genusa
-# 1) urlopen has finally died the death due to SSL changes on PyPi. I've 
-#    done a rough replacement of urlopen with the requests module to get the
-#    utility functioning again. More cleanup is needed now.
+# 1) urllib2.urlopen has finally died the death due to SSL changes on PyPi. I've 
+#      done a rough replacement of urlopen with the requests module to get the
+#      utility functioning again. More cleanup is needed now.
+# 2) (a) Adds a final / to the end of the 'simple' URL (b) also calls .lower() on 
+#      the package name and (c) changed http to https to end the -3- unnecessary
+#      301 redirects and just get the files we want on the first call
 
 
 import datetime
@@ -267,7 +270,7 @@ class Package(object):
         This handles the list of versions and fetches the
         files
     """
-    def __init__(self, package_name, pypi_base_url="http://pypi.python.org/simple"):
+    def __init__(self, package_name, pypi_base_url="https://pypi.python.org/simple"):
         self._links_cache = None
 
         if not util.isASCII(package_name):
@@ -288,7 +291,7 @@ class Package(object):
                 filename = urllib.quote(filename)
             except KeyError:
                 raise PackageError("%s is not a valid filename." % filename)
-        url = "%s/%s" % (self._pypi_base_url, self.name)
+        url = "%s/%s/" % (self._pypi_base_url, self.name.lower())
         #print "--> ", url
         if filename:
             url = "%s/%s" % (url, filename)
