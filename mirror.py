@@ -44,14 +44,16 @@
 # Modifications May 2015 by Stephen Genusa
 # 1) urllib2.urlopen has finally died the death due to SSL changes on PyPi. I've 
 #      done a rough replacement of urlopen with the requests module to get the
-#      utility functioning again. More cleanup is needed now.
+#      utility functioning again.
 # 2) (a) Adds a final / to the end of the 'simple' URL (b) also calls .lower() on 
 #      the package name (c) changed http to https and (d) changes '_' to '-'. These
 #      changes put an end to -5- frequent but unnecessary 301 redirects and the 
-#      proper URL is now requested on the first call
+#      proper URL is now requested on the first call.
 # 3) Detects when HTML (custom 404 pages) are returned rather than the requested
-#      binary package file and does not save these invalid files
-
+#      binary package file and does not save these invalid files.
+# 4) Can now generate an expanded index_expanded.html with the -w option which 
+#      creates an HTML table with package name and short description summary from
+#      the package DOAP XML files, if available.
 
 # Standard Library Modules
 import datetime
@@ -60,7 +62,7 @@ try:
     from hashlib import md5
 except ImportError:
     from md5 import md5
-from glob import fnmatch
+import glob
 import httplib
 import linecache
 import optparse
@@ -82,9 +84,8 @@ import xmlrpclib
 
 # 3rd Party Project Modules
 from BeautifulSoup import BeautifulSoup
-import HTMLParser
 import requests
-import zc.lockfile
+import zc.lockfile # https://pypi.python.org/pypi/zc.lockfile/1.1.0
 
 # Internal Project Modules
 from logger import getLogger
@@ -94,6 +95,7 @@ import touch_archives
 
 LOG = None
 dev_package_regex = re.compile(r'\ddev[-_]')
+MAX_FILE_CANDIDATES_TO_RETURN = 30
 
 
 
@@ -113,7 +115,7 @@ def GetExceptionInfo():
     filename = f.f_code.co_filename
     linecache.checkcache(filename)
     line = linecache.getline(filename, lineno, f.f_globals)
-    return 'EXCEPTION IN ({}, LINE {} "{}"): {}'.format(filename, lineno, line.strip(), exc_obj)
+    return 'Exception in ({}, Line {} "{}"): {}'.format(filename, lineno, line.strip(), exc_obj)
 
 
 
@@ -236,7 +238,7 @@ class PypiPackageList(object):
         filtered_packages = []
         for package in packages:
             if len(filter_by) > 0:
-                if not True in [fnmatch.fnmatch(package, f) for f in filter_by]:
+                if not True in [glob.fnmatch.fnmatch(package, f) for f in filter_by]:
                     continue
                 filtered_packages.append(package)
             else:
@@ -373,7 +375,7 @@ class Package(object):
     def _fetch_links(self, html):
         try:
             soup = BeautifulSoup(html)
-        except HTMLParser.HTMLParseError, e:
+        except Exception, e:
             raise PackageError("HTML parse error: %s" % e)
         links = []
         for link in soup.findAll("a"):
@@ -423,13 +425,13 @@ class Package(object):
                 if follow_external_index_pages:
                     try:
                         r = requests.get(link)
-                        #site = urlopen()
                     except Exception, e:
                         LOG.warn('Error downloading %s (%s)' % (link, e))
                         continue
 
-                    if "text/html" not in r.headers['content-type']: 
-                        continue
+                    if 'content-type' in r.headers:
+                        if "text/html" not in r.headers['content-type']:
+                            continue
 
                     # we have a valid html page now. Parse links and download them.
                     # They have mostly no md5 hash.
@@ -465,7 +467,7 @@ class Package(object):
                     #print len(candidates)
                     #print candidates
                     
-                    for c in candidates[-20:][::-1]:
+                    for c in candidates[-MAX_FILE_CANDIDATES_TO_RETURN:][::-1]:
                         yield c
 
 
@@ -500,7 +502,7 @@ class Package(object):
     def matches(self, filename, filename_matches):
         #print "in matches"
         for filename_match in filename_matches:
-            if fnmatch.fnmatch(filename, filename_match):
+            if glob.fnmatch.fnmatch(filename, filename_match):
                 return True
 
         # perhaps 'filename' is part of a query string, so 
@@ -623,6 +625,46 @@ class Mirror(object):
         fp.write("<br />\n".join(full_list))
         fp.write(footer)
         fp.close()
+        
+
+    def expanded_index_html(self):
+        header = "<html><head><title>PyPI Mirror</title></head><body>\n"
+        header += "<h1>PyPI Mirror</h1><h2>Last update: " + \
+            datetime.datetime.utcnow().strftime("%c UTC")+"</h2>\n"
+        _ls = self.ls()
+        total_links = len(_ls)
+        with open(os.path.join(self.base_path, "index_expanded.html"), "wb") as expanded_html_file:
+            expanded_html_file.write(header.encode('utf-8'))
+            expanded_html_file.write('<table border="1">')
+            for link_counter, link in enumerate(_ls):
+                link_counter += 1.0
+                progress = int(link_counter / total_links * 100)
+                sys.stdout.write('\rGenerating Expanded Index [{0}] {1}% ({2}/{3})'.format(('#'*(progress/10)).ljust(10), progress, int(link_counter), total_links))
+                search_path = os.path.join(local_pypi_path, link, '*.xml')
+                xml_files = filter(os.path.isfile, glob.glob(search_path))
+                xml_files.sort(key=lambda x: os.path.getmtime(x))
+                link_desc = ""
+                if len(xml_files) > 0:
+                    xml_info_filename = xml_files[-1]
+                    if os.path.isfile(xml_info_filename):
+                        raw_xml = ""
+                        with open(xml_info_filename, "r") as xml_file:
+                            raw_xml = xml_file.read()
+                            if 'shortdesc' in raw_xml:
+                                try:
+                                    dom3 = parseString(raw_xml)
+                                    link_desc = dom3.getElementsByTagName('shortdesc')[0].firstChild.data
+                                    link_desc = link_desc.replace('<', '&lt;').replace('>', '&gt;')
+                                except:
+                                    pass
+        
+                expanded_html_file.write(("<tr><td>" + self._html_link(link).replace('/">', '/index.html">') + "</td><td>" + link_desc + "</td></tr>\n").encode('utf-8'))
+            expanded_html_file.write("</table>\n")
+            expanded_html_file.write("<p class='footer'>Generated by %s; %d packages mirrored. For details see the <a href='http://www.coactivate.org/projects/pypi-mirroring'>z3c.pypimirror project page.</a></p>\n" % (pypimirror_version(), len(_ls)))
+            expanded_html_file.write("</body></html>\n")
+        print "\n"
+
+
 
     def mirror(self, 
                package_list, 
@@ -1027,6 +1069,8 @@ def run(args=None):
                       default=False, help='nonstop loop')
     parser.add_option('-r', '--restart', dest='restart', action='store_true',
                       default=False, help='restart with clean indexes')
+    parser.add_option('-w', '--write-expanded-index', dest='write_expanded_index', action='store_true',
+                      default=False, help='Write index with project descriptions')
     options, args = parser.parse_args()
     if len(args) != 1:
         parser.error("No configuration file specified")
@@ -1036,7 +1080,7 @@ def run(args=None):
     config = get_config_options(config_file_name)
 
     local_pypi_path = config["mirror_file_path"]
-       
+    
     # correct things from config
     nonstop = options.nonstop
     filename_matches = config["filename_matches"].split()
@@ -1090,8 +1134,11 @@ def run(args=None):
 
     mirror = Mirror(config["mirror_file_path"])
     
+ 
     lock = zc.lockfile.LockFile(os.path.join(config["mirror_file_path"], config["lock_file_name"]))
     
+
+    expanded_index_written = False
 
     try:
         if options.indexes_only:
@@ -1102,6 +1149,9 @@ def run(args=None):
                     mirror.mirror(package_list, filename_matches, verbose, 
                                   cleanup, create_indexes, external_links, 
                                   follow_external_index_pages, config["base_url"])
+                    if not expanded_index_written and options.write_expanded_index:
+                        expanded_index_written = True
+                        mirror.expanded_index_html()
                 except Exception as e:
                    LOG.debug(GetExceptionInfo())
                    print GetExceptionInfo()
